@@ -1,0 +1,147 @@
+import fs from "fs-extra";
+import path from "path";
+
+export default class HackExtractor {
+  constructor(repoDir) {
+    this.repoDir = repoDir;
+  }
+
+  async run() {
+    console.log("🔍 Extracting hacks from:", this.repoDir);
+
+    const mainReadmePath = path.join(this.repoDir, "README.md");
+    if (!await fs.pathExists(mainReadmePath)) {
+      throw new Error("Main README.md not found in repo root");
+    }
+    const mainReadme = await fs.readFile(mainReadmePath, "utf8");
+
+    // Match incident links: [YYYYMMDD Protocol](#anchor) OR [YYYYMMDD Protocol](past/YYYY/README.md#anchor)
+    const incidentLinks = [...mainReadme.matchAll(/\[(\d{8})\s+([^\]]+)\]\(([^)]+)\)/g)];
+    const manifest = [];
+
+    for (const match of incidentLinks) {
+      const [_, date, protocol, link] = match;
+
+      let readmeFile = link;
+      let anchor = null;
+
+      // Split link into file and anchor
+      if (link.includes("#")) {
+        [readmeFile, anchor] = link.split("#");
+      }
+
+      // Default to root README if link is empty
+      if (!readmeFile || readmeFile === "") readmeFile = "README.md";
+
+      // Resolve the full path of the README
+      let readmePath = path.join(this.repoDir, readmeFile);
+
+      // If the path is a directory, use README.md inside it
+      if (await fs.pathExists(readmePath)) {
+        const stat = await fs.stat(readmePath);
+        if (stat.isDirectory()) {
+          readmePath = path.join(readmePath, "README.md");
+        }
+      }
+
+      if (!await fs.pathExists(readmePath)) {
+        console.warn(`⚠️  README not found: ${readmePath}, skipping ${protocol}`);
+        continue;
+      }
+
+      const readmeText = await fs.readFile(readmePath, "utf8");
+      const sections = readmeText.split(/^###\s+/m).filter(s => s.trim().length > 0);
+
+      let incidentSection = null;
+
+      if (anchor) {
+        const normalizedAnchor = anchor.toLowerCase().replace(/\s+/g, "-");
+        incidentSection = sections.find(sec => {
+          const headerLine = sec.split("\n")[0].trim().toLowerCase();
+          const headerAnchor = headerLine.replace(/^#+\s*/, "").replace(/\s+/g, "-");
+          return headerAnchor.includes(normalizedAnchor);
+        });
+      }
+
+      // Fallback: first section containing the date
+      if (!incidentSection) {
+        incidentSection = sections.find(sec => sec.includes(date));
+      }
+
+      if (!incidentSection) {
+        console.warn(`⚠️  Could not find section for ${protocol} in ${readmePath}`);
+        continue;
+      }
+
+      // Extract contracts
+      const solMatches = [...incidentSection.matchAll(/\[([^\]]+\.sol)\]\(([^)]+\.sol)\)/g)];
+      const contracts = [];
+      for (const m of solMatches) {
+        const solFileName = m[1];
+        const solFilePath = path.join(path.dirname(readmePath), m[2]);
+        let solContent = "";
+        if (await fs.pathExists(solFilePath)) {
+          solContent = await fs.readFile(solFilePath, "utf8");
+        }
+        contracts.push({
+          file: solFileName,
+          content: solContent.slice(0, 4000),
+          functions: this.extractFunctions(solContent),
+          references: this.extractReferences(solContent)
+        });
+      }
+
+      // Extract loss
+      const lossMatch = incidentSection.match(/Lost:\s*([\d.,MK$]+)/i);
+      const loss = lossMatch ? lossMatch[1] : null;
+
+      // Extract test command
+      const testMatch = incidentSection.match(/forge test[^\n]+/i);
+      const test_command = testMatch ? testMatch[0].trim() : null;
+
+      manifest.push({
+        id: `${date}-${protocol.replace(/\s+/g, "_")}`,
+        folder: path.dirname(readmeFile),
+        protocol,
+        date,
+        title: protocol,
+        loss,
+        test_command,
+        readme: incidentSection.slice(0, 4000),
+        contract_files: contracts.map(c => c.file),
+        contracts,
+        references: this.extractReferences(incidentSection),
+        vulnerability: this.extractVulnerability(incidentSection),
+        snippet: contracts.map(c => c.content).join("\n").slice(0, 4000)
+      });
+
+      console.log("Processed:", protocol);
+    }
+
+    const outFile = path.join(this.repoDir, "manifest.json");
+    await fs.writeJson(outFile, manifest, { spaces: 2 });
+    console.log(`✅ Wrote ${manifest.length} hack entries → ${outFile}`);
+
+    return manifest;
+  }
+
+  extractFunctions(source) {
+    const funcs = [];
+    const re = /function\s+(\w+)\s*\(/g;
+    let match;
+    while ((match = re.exec(source))) funcs.push(match[1]);
+    return funcs;
+  }
+
+  extractReferences(text) {
+    return text.match(/https?:\/\/[^\s)]+/g) || [];
+  }
+
+  extractVulnerability(section) {
+    const firstLine = section.split("\n").find(l => l.trim().length > 0)?.trim();
+    if (!firstLine) return "Unknown";
+    const match = firstLine.match(/-\s*(.+)$/);
+    if (match) return match[1].trim();
+    return "Unknown";
+  }
+}

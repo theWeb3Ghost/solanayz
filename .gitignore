@@ -1,0 +1,14 @@
+node_modules/
+slither-env/
+mythril-env/
+foundry-work/
+models/
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+dist/
+build/
+.DS_Store
+*.logs

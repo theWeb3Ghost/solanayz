@@ -1,0 +1,8 @@
+{
+  "address": "0x89e694b7e739f3a8dc38af8ff23acaf78d011597",
+  "implementation": null,
+  "contractName": "Kernel",
+  "compilerVersion": "v0.8.25+commit.b61c2a91",
+  "optimizerEnabled": true,
+  "optimizerRuns": 200
+}
